@@ -99,6 +99,7 @@ class Network(object):
         self.biases = [np.random.randn(y, 1) for y in self.sizes[1:]]
         self.weights = [np.random.randn(y, x)/np.sqrt(x)
                         for x, y in zip(self.sizes[:-1], self.sizes[1:])]
+        self.velocity = [np.zeros(w.shape, dtype=np.float32) for w in self.weights]
 
     def large_weight_initializer(self):
         """Initialize the weights using a Gaussian distribution with mean 0
@@ -128,6 +129,8 @@ class Network(object):
 
     def SGD(self, training_data, epochs, mini_batch_size, eta,
             lmbda = 0.0,
+            momentum = 0.0,
+            earlyStoppingCount=10,
             evaluation_data=None,
             monitor_evaluation_cost=False,
             monitor_evaluation_accuracy=False,
@@ -156,14 +159,19 @@ class Network(object):
         n = len(training_data)
         evaluation_cost, evaluation_accuracy = [], []
         training_cost, training_accuracy = [], []
+		
+        bestAccuracy = 0
+        bestAccuracyHoldsFor = 0
+        originalEta = eta
         for j in xrange(epochs):
             random.shuffle(training_data)
             mini_batches = [
                 training_data[k:k+mini_batch_size]
                 for k in xrange(0, n, mini_batch_size)]
             for mini_batch in mini_batches:
-                self.update_mini_batch(
-                    mini_batch, eta, lmbda, len(training_data))
+				#self.update_mini_batch(
+				#    mini_batch, eta, lmbda, len(training_data))
+                self.updateMiniBatchMomentum(mini_batch, eta, lmbda, len(training_data), momentum)
             print "Epoch %s training complete" % j
             if monitor_training_cost:
                 cost = self.total_cost(training_data, lmbda)
@@ -172,8 +180,7 @@ class Network(object):
             if monitor_training_accuracy:
                 accuracy = self.accuracy(training_data, convert=True)
                 training_accuracy.append(accuracy)
-                print "Accuracy on training data: {} / {}".format(
-                    accuracy, n)
+                print "Accuracy on training data: {} / {}".format(accuracy, n)
             if monitor_evaluation_cost:
                 cost = self.total_cost(evaluation_data, lmbda, convert=True)
                 evaluation_cost.append(cost)
@@ -183,6 +190,19 @@ class Network(object):
                 evaluation_accuracy.append(accuracy)
                 print "Accuracy on evaluation data: {} / {}".format(
                     self.accuracy(evaluation_data), n_data)
+			
+                if accuracy > bestAccuracy:
+                    bestAccuracy = accuracy
+                    bestAccuracyHoldsFor = 0
+                else:
+                    bestAccuracyHoldsFor += 1
+                    if bestAccuracyHoldsFor >= earlyStoppingCount:
+                        bestAccuracyHoldsFor = 0
+                        print "No improvement for {} epochs. Halving learning rate.".format(earlyStoppingCount)
+                        eta /= 2
+                        if eta <= (originalEta / 128.0):
+                            print "No improvement for: {} epochs with learning rate being halved 7-fold (128 times). Stopping early.".format(earlyStoppingCount)
+                            break
             print
         return evaluation_cost, evaluation_accuracy, \
             training_cost, training_accuracy
@@ -197,12 +217,34 @@ class Network(object):
         """
         nabla_b = [np.zeros(b.shape) for b in self.biases]
         nabla_w = [np.zeros(w.shape) for w in self.weights]
+		
         for x, y in mini_batch:
             delta_nabla_b, delta_nabla_w = self.backprop(x, y)
             nabla_b = [nb+dnb for nb, dnb in zip(nabla_b, delta_nabla_b)]
             nabla_w = [nw+dnw for nw, dnw in zip(nabla_w, delta_nabla_w)]
         self.weights = [(1-eta*(lmbda/n))*w-(eta/len(mini_batch))*nw
                         for w, nw in zip(self.weights, nabla_w)]
+        self.biases = [b-(eta/len(mini_batch))*nb
+                       for b, nb in zip(self.biases, nabla_b)]
+
+    def updateMiniBatchMomentum(self, mini_batch, eta, lmbda, n, momentum):
+	"""Update the network's weights and biases by applying gradient
+		descent using backpropagation to a single mini batch.  The
+		``mini_batch`` is a list of tuples ``(x, y)``, ``eta`` is the
+		learning rate, ``lmbda`` is the regularization parameter, and
+		``n`` is the total size of the training data set.
+		
+		"""
+        nabla_b = [np.zeros(b.shape) for b in self.biases]
+        nabla_w = [np.zeros(w.shape) for w in self.weights]
+	
+        for x, y in mini_batch:
+            delta_nabla_b, delta_nabla_w = self.backprop(x, y)
+            nabla_b = [nb+dnb for nb, dnb in zip(nabla_b, delta_nabla_b)]
+            nabla_w = [nw+dnw for nw, dnw in zip(nabla_w, delta_nabla_w)]
+        self.velocity = [(1-eta*(lmbda/n))*v*momentum-(eta/len(mini_batch))*nw
+                        for v, nw in zip(self.velocity, nabla_w)]
+        self.weights = np.add(self.weights, self.velocity)#[w + float(v) in zip(self.weights, self.velocity)]
         self.biases = [b-(eta/len(mini_batch))*nb
                        for b, nb in zip(self.biases, nabla_b)]
 
@@ -271,7 +313,7 @@ class Network(object):
                         for (x, y) in data]
         return sum(int(x == y) for (x, y) in results)
 
-    def total_cost(self, data, lmbda, convert=False):
+    def total_cost(self, data, lmbda, convert=False, lOne=False):
         """Return the total cost for the data set ``data``.  The flag
         ``convert`` should be set to False if the data set is the
         training data (the usual case), and to True if the data set is
@@ -283,8 +325,10 @@ class Network(object):
             a = self.feedforward(x)
             if convert: y = vectorized_result(y)
             cost += self.cost.fn(a, y)/len(data)
-        cost += 0.5*(lmbda/len(data))*sum(
-            np.linalg.norm(w)**2 for w in self.weights)
+        if lOne:
+            cost += (lmbda/len(data))*sum(np.linalg.norm(w) for w in self.weights)
+        else:
+            cost += 0.5*(lmbda/len(data))*sum(np.linalg.norm(w)**2 for w in self.weights)
         return cost
 
     def save(self, filename):
